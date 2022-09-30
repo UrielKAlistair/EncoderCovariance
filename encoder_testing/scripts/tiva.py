@@ -275,6 +275,15 @@ class TivaOutput:
             r.sleep()
 
 
+class FakeTiva:
+    def readline(self):
+        pass
+
+    def readlines(self):
+        for i in range(10):
+            yield "10 30 45"
+        return
+
 def main():
     port: str = '/dev/serial/by-id/usb-Texas_Instruments_In-Circuit_Debug_Interface_0E2353E3-if00'
     baud: int = 19200

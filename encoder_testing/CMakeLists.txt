@@ -145,13 +145,10 @@ include_directories(
 #target_link_libraries(covarmaker ${catkin_LIBRARIES} )
 
 
-catkin_install_python(PROGRAMS scripts/surajbicycle.py
+catkin_install_python(PROGRAMS scripts/vajra_odom.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}) 
   
-catkin_install_python(PROGRAMS scripts/bicycle_model_tester.py
+catkin_install_python(PROGRAMS scripts/fakeencoders.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}) 
 
-catkin_install_python(PROGRAMS scripts/bicycle_model.py
-  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}) 
-  
   
