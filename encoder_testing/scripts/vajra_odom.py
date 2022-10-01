@@ -10,6 +10,15 @@ from nav_msgs.msg import Odometry
 from tf.transformations import quaternion_from_euler
 
 
+def sgn(x):
+    if x > 1:
+        return 1
+    elif x == 0:
+        return 0
+    else:
+        return -1
+
+
 class TivaOutput:
     # Defining Vehicle and encoder constants
     wheel_dist: float = 0.67
@@ -27,8 +36,8 @@ class TivaOutput:
     # Link to paper: https://www.cs.cmu.edu/~motionplanning/papers/sbp_papers/kalman/chong_accurate_odometry_error.pdf
     # https://ecse.monash.edu/techrep/reports/pre-2003/MECSE-6-1996.pdf
 
-    kl = 0.001
-    kr = 0.001
+    kl = 0.00001
+    kr = 0.00001
 
     def __init__(self, tiva, odom_topic: str = 'odom', wheel_vel_topic: str = "wheel_vel", rate: int = 50):
 
@@ -108,7 +117,7 @@ class TivaOutput:
         # Whenever we are checking if the radius of curvature has changed, we cannot expect a perfect equality.
         # If the r is within the tolerance from r old, they are considered equal.
         # TODO: Determine a reasonable number for r_tolerance
-        self.r_tolerance = 10**(-5)
+        self.r_tolerance = 10 ** (-5)
 
     def update(self, computer_dt: float):
         right = 0
@@ -186,11 +195,28 @@ class TivaOutput:
         c3 = self.kr * self.l_dist ** 2 * abs(self.r_dist) + self.kl * self.r_dist ** 2 * abs(self.l_dist)
         U = np.zeros((3, 3))
 
+        # Computing sin and cos of yaw to avoid wasteful recomputation.
+
+        cos_yaw = math.cos(self.yaw)
+        sin_yaw = math.sin(self.yaw)
+
         ####################
         # Defining Matrix U#
         ####################
 
-        if self.r == -1:
+        if self.r == 0:
+            coeff_r0_1 = (self.wheel_dist / 32) * sgn(self.yaw - self.theta0) * (self.kl + self.kr)
+            U[0, 0] = coeff_r0_1 * (2 * (self.yaw - self.theta0) - math.sin(2 * self.theta0) + math.sin(2 * self.yaw))
+            U[1, 1] = coeff_r0_1 * (2 * (self.yaw - self.theta0) + math.sin(2 * self.theta0) - math.sin(2 * self.yaw))
+            U[2, 2] = abs(self.yaw - self.theta0) * (self.kl + self.kr) / (2 * self.wheel_dist)
+            U[0, 1] = (math.cos(2 * self.theta0) - math.cos(2 * self.yaw)) * coeff_r0_1
+            U[1, 0] = U[0, 1]
+            U[0, 2] = sgn(self.yaw - self.theta0) * (sin_yaw - math.sin(self.theta0)) * (self.kr - self.kl) / 4
+            U[2, 0] = U[0, 2]
+            U[1, 2] = sgn(self.yaw - self.theta0) * (cos_yaw - math.cos(self.theta0)) * (self.kr - self.kl)
+            U[2, 0] = U[0, 2]
+
+        elif self.r == -1:
 
             ksdiff = self.kl - self.kr
             kssum = self.kl + self.kr
@@ -198,19 +224,19 @@ class TivaOutput:
             dbybsq = (self.l_dist / self.wheel_dist) ** 2
 
             U[0, 0] = abs(self.l_dist) * (
-                    (pow(math.cos(self.yaw), 2) / 4) * kssum + (dbyb / 2) * math.sin(self.yaw) * math.cos(
-                self.yaw) * ksdiff + (dbybsq / 3) * pow(math.sin(self.yaw), 2) * kssum)
-            U[1, 1] = U[0, 0] - abs(self.l_dist) * dbyb * math.sin(self.yaw) * math.cos(self.yaw) * ksdiff
+                    (pow(cos_yaw, 2) / 4) * kssum + (dbyb / 2) * sin_yaw * math.cos(
+                self.yaw) * ksdiff + (dbybsq / 3) * pow(sin_yaw, 2) * kssum)
+            U[1, 1] = U[0, 0] - abs(self.l_dist) * dbyb * sin_yaw * cos_yaw * ksdiff
             U[2, 2] = (abs(self.l_dist) / pow(self.wheel_dist, 2)) * kssum
             U[0, 1] = abs(self.l_dist) * (((1 / 8) - dbybsq / 6) * math.sin(2 * self.yaw) * kssum + math.cos(
                 2 * self.yaw) * dbyb * ksdiff / 4)
             U[1, 0] = U[0, 1]
             U[1, 2] = abs(self.l_dist) * (
-                    math.cos(self.yaw) * ksdiff / (2 * self.wheel_dist) - self.l_dist * math.sin(self.yaw) * (
+                    cos_yaw * ksdiff / (2 * self.wheel_dist) - self.l_dist * sin_yaw * (
                     kssum / (2 * pow(self.wheel_dist, 2))))
             U[2, 1] = U[1, 2]
             U[2, 1] = abs(self.l_dist) * (
-                    math.sin(self.yaw) * (ksdiff / 2 * self.wheel_dist) - self.l_dist * math.cos(self.yaw) * (
+                    sin_yaw * (ksdiff / 2 * self.wheel_dist) - self.l_dist * cos_yaw * (
                     kssum / (2 * pow(self.wheel_dist, 2))))
             U[1, 2] = U[2, 1]
 
@@ -221,20 +247,20 @@ class TivaOutput:
             coeff2 = c2 / pow(self.wheel_dist, 2)
             coeff3 = (self.wheel_dist * c3 / lr3)
 
-            U[0, 0] = -coeff1 * (math.sin(self.theta0) - math.sin(self.yaw)) * math.cos(self.yaw) + pow(
-                (self.r * math.cos(self.yaw) / self.wheel_dist), 2) * c2 - (coeff3 / 4) * (
+            U[0, 0] = -coeff1 * (math.sin(self.theta0) - math.sin(self.yaw)) * cos_yaw + pow(
+                (self.r * cos_yaw / self.wheel_dist), 2) * c2 - (coeff3 / 4) * (
                               2 * (self.yaw - self.theta0) - math.sin(2 * self.theta0) + math.sin(2 * self.yaw))
-            U[1, 1] = -coeff1 * (math.cos(self.yaw) - math.cos(self.theta0)) * math.sin(self.yaw) + pow(
-                (self.r * math.sin(self.yaw) / self.wheel_dist), 2) * c2 - (coeff3 / 4) * (
+            U[1, 1] = -coeff1 * (cos_yaw - math.cos(self.theta0)) * sin_yaw + pow(
+                (self.r * sin_yaw / self.wheel_dist), 2) * c2 - (coeff3 / 4) * (
                               2 * (self.yaw - self.theta0) + math.sin(2 * self.theta0) - math.sin(2 * self.yaw))
             U[2, 2] = coeff2
             U[0, 1] = -(coeff1 / 2) * (math.cos(2 * self.yaw) - math.cos(self.yaw + self.theta0)) + (
                     c2 * self.r ** 2 * coeff2 / 2) * math.sin(2 * self.yaw) - (coeff3 / 4) * (
                               math.cos(2 * self.theta0) - math.cos(2 * self.yaw))
             U[1, 0] = U[0, 1]
-            U[0, 2] = (c1 / lr2) * (math.sin(self.theta0) - math.sin(self.yaw)) - self.r * coeff2 * math.cos(self.yaw)
+            U[0, 2] = (c1 / lr2) * (math.sin(self.theta0) - math.sin(self.yaw)) - self.r * coeff2 * cos_yaw
             U[2, 0] = U[0, 2]
-            U[1, 2] = (c1 / lr2) * (math.cos(self.yaw) - math.cos(self.theta0)) - self.r * coeff2 * math.sin(self.yaw)
+            U[1, 2] = (c1 / lr2) * (cos_yaw - math.cos(self.theta0)) - self.r * coeff2 * sin_yaw
             U[2, 1] = U[1, 2]
 
         #####################
@@ -263,10 +289,10 @@ class TivaOutput:
                                        Quaternion(*quaternion_from_euler(0, 0, self.yaw)))
 
             # Coverting 3x3 to 6x6 for ros
-            roscovar = [0]*36
+            roscovar = [0] * 36
             for i in range(3):
-                roscovar[i]=self.covar3by3[0,i]
-                roscovar[6+i] = self.covar3by3[1, i]
+                roscovar[i] = self.covar3by3[0, i]
+                roscovar[6 + i] = self.covar3by3[1, i]
                 roscovar[30 + i] = self.covar3by3[2, i]
 
             self.odom.pose.covariance = roscovar
@@ -282,11 +308,11 @@ class FakeTiva:
 
     def readlines(self):
         for i in range(10):
-            yield "1 300 400"
+            yield "1 350 400"
         return
 
-def main():
 
+def main():
     tiva = FakeTiva()
     try:
         tout = TivaOutput(tiva)
@@ -294,6 +320,7 @@ def main():
     except Exception as e:
         print(e)
         pass
+
 
 if __name__ == "__main__":
     main()
