@@ -1,6 +1,13 @@
 #!/usr/bin/python3
+
 # This code takes in encoder data and uses dead reckoning to deduce the position of the robot (with covariance).
-# This is packed into ann odom msg and sent to /odom
+# This is packed into an odom msg and sent to /odom
+
+# Inputs : enc counts from Tiva. Class FakeTiva made for testing via rostopic.
+# Expected input format: timegap for which counts are measured, left count, right count
+# Parameters: Vehicle constants wheel separation, wheel radius, pulses per rev etc. defined in init of TivaOutput
+# Arbitrary constants: r_thresh r_tolerance kl kr
+# Output robot pose and pose covar packaged in odom
 
 import math
 import time
@@ -11,7 +18,7 @@ from geometry_msgs.msg import Pose, Quaternion, Point
 from virat_msgs.msg import WheelVel
 from nav_msgs.msg import Odometry
 from tf.transformations import quaternion_from_euler
-from std_msgs.msg import Float64
+from std_msgs.msg import Int64
 
 
 def sgn(x):
@@ -113,7 +120,7 @@ class TivaOutput:
         ###################################
 
         # TODO: Determine a reasonable number beyond which r can be set to -1, so that we can avoid heavy computation.
-        # This number is called r_thresh and is defined arbitrarily by me to be 10 kilometers.
+        # This number is called r_thresh and is presently defined arbitrarily to be 10 kilometers.
         self.r_thresh = 10000
 
         # Whenever we are checking if the radius of curvature has changed, we cannot expect a perfect equality.
@@ -121,6 +128,7 @@ class TivaOutput:
         # TODO: Determine a reasonable number for r_tolerance
         self.r_tolerance = 10 ** (-5)
 
+    # updates the vehicle's position and pose covariance when new data is received
     def update(self, computer_dt: float):
         right = 0
         left = 0
@@ -131,7 +139,7 @@ class TivaOutput:
                 # n is the number of counts
                 # TODO: Check for overflow
                 # 1 indicates right and 2 indicates left
-                ddt, n1, n2 = map(float, line.strip().split(' '))
+                ddt, n1, n2 = map(int, line.strip().split(' '))
             except ValueError:
                 rospy.logerr(f"TIVA returned an invalid line of data: {line}")
                 # print("VALUE ERROR")  # TODO: ```readlines``` is returning partial lines :ugh: fix.
@@ -149,13 +157,13 @@ class TivaOutput:
             # s is the distance moved by each wheel
             s1, s2 = th1 * self.wheel_radius, th2 * self.wheel_radius
 
-            self.x += ((s1 + s2) / 2) * math.cos(self.yaw)
-            self.y += ((s1 + s2) / 2) * math.sin(self.yaw)
-            self.yaw += (s1 - s2) / self.wheel_dist
-
             # Update Velocity
             right += n1
             left += n2
+
+            self.x += ((s1 + s2) / 2) * math.cos(self.yaw)
+            self.y += ((s1 + s2) / 2) * math.sin(self.yaw)
+            self.yaw += (s1 - s2) / self.wheel_dist
 
             # Update Covariances
             if s1 != s2:
@@ -185,6 +193,7 @@ class TivaOutput:
 
         # print(f"{dt}\t{right:.4f}\t{left:.4f}\t{self.vr:.4f}\t{self.vl:.4f}")
 
+    # Accessed by update for covariance. Separated for modularity.
     def get_covariance(self):
 
         # Updating matrix A to suit current state
@@ -197,7 +206,7 @@ class TivaOutput:
         c3 = self.kr * self.l_dist ** 2 * abs(self.r_dist) + self.kl * self.r_dist ** 2 * abs(self.l_dist)
         U = np.zeros((3, 3))
 
-        # Computing sin and cos of yaw to avoid wasteful recomputation.
+        # Computing sin and cos of yaw to avoid recomputation.
 
         cos_yaw = math.cos(self.yaw)
         sin_yaw = math.sin(self.yaw)
@@ -269,6 +278,7 @@ class TivaOutput:
 
         self.covar3by3 = U + self.A @ self.S0 @ self.A.T
 
+    # Main loop
     def run(self):
         r = rospy.Rate(self.rate)
         msg = Odometry()
@@ -312,34 +322,45 @@ class FakeTiva:
         self.del_t_r = 0
         self.left = 0
         self.right = 0
+        self.ltot = None
+        self.rtot = None
 
+    from message_filters import TimeSynchronizer
     def callback_left(self, data):
 
         now = time.time()
         self.del_t_l = now - self.told_l
-        self.told_l=now
-        self.left = data.data
+        self.told_l = now
+        if self.ltot is None:
+            self.left = 0
+            return
+        self.left = data.data - self.ltot
+        self.ltot = data.data
 
     def callback_right(self, data):
 
         now = time.time()
         self.del_t_r = now - self.told_r
         self.told_r = now
-        self.right = data.data
+        if self.rtot is None:
+            self.right = 0
+            return
+        self.right = data.data - self.rtot
+        self.rtot = data.data
 
     def readline(self):
         pass
 
     def readlines(self):
-        rospy.Subscriber("enc0_rpm", Float64, self.callback_right)
-        rospy.Subscriber("enc1_rpm", Float64, self.callback_left)
+        rospy.Subscriber("enc0_pos", Int64, self.callback_right)
+        rospy.Subscriber("enc1_pos", Int64, self.callback_left)
         for i in range(10):
-            yield f"{(self.del_t_l+self.del_t_r)/2} {self.left} {self.right}"
+            yield f"{(self.del_t_l + self.del_t_r) / 2} {self.left} {self.right}"
         return
 
 
 def main():
-    rospy.init_node('tiva_ros_driver')
+    rospy.init_node('enc_odom')
     tiva = FakeTiva()
     try:
         tout = TivaOutput(tiva)
