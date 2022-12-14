@@ -1,4 +1,7 @@
-#! /usr/bin/python3
+#!/usr/bin/python3
+# This code takes in encoder data and uses dead reckoning to deduce the position of the robot (with covariance).
+# This is packed into ann odom msg and sent to /odom
+
 import math
 import time
 import numpy as np
@@ -8,6 +11,7 @@ from geometry_msgs.msg import Pose, Quaternion, Point
 from virat_msgs.msg import WheelVel
 from nav_msgs.msg import Odometry
 from tf.transformations import quaternion_from_euler
+from std_msgs.msg import Float64
 
 
 def sgn(x):
@@ -31,7 +35,7 @@ class TivaOutput:
     _flip_motor_channels: bool = False
 
     # variance of left wheel measurements, sigma**2 = kl * |Distance travelled by left wheel|
-    # Similar thing for right wheel.
+    # Similar thing for right wheel
     # NOTE: The paper from which I got the covariance matrix calls what I call kl as kl**2.
     # Link to paper: https://www.cs.cmu.edu/~motionplanning/papers/sbp_papers/kalman/chong_accurate_odometry_error.pdf
     # https://ecse.monash.edu/techrep/reports/pre-2003/MECSE-6-1996.pdf
@@ -49,8 +53,6 @@ class TivaOutput:
         self.tiva = tiva
         time.sleep(0.2)
         self.tiva.readline()
-
-        rospy.init_node('tiva_ros_driver')
 
         self.odom_pub = rospy.Publisher(self.odom_topic, Odometry, queue_size=1)
         self.vel_pub = rospy.Publisher(self.wheel_vel_topic, WheelVel, queue_size=1)
@@ -112,7 +114,7 @@ class TivaOutput:
 
         # TODO: Determine a reasonable number beyond which r can be set to -1, so that we can avoid heavy computation.
         # This number is called r_thresh and is defined arbitrarily by me to be 10 kilometers.
-        self.r_thresh = 1000
+        self.r_thresh = 10000
 
         # Whenever we are checking if the radius of curvature has changed, we cannot expect a perfect equality.
         # If the r is within the tolerance from r old, they are considered equal.
@@ -129,7 +131,7 @@ class TivaOutput:
                 # n is the number of counts
                 # TODO: Check for overflow
                 # 1 indicates right and 2 indicates left
-                ddt, n1, n2 = map(int, line.strip().split(' '))
+                ddt, n1, n2 = map(float, line.strip().split(' '))
             except ValueError:
                 rospy.logerr(f"TIVA returned an invalid line of data: {line}")
                 # print("VALUE ERROR")  # TODO: ```readlines``` is returning partial lines :ugh: fix.
@@ -303,16 +305,41 @@ class TivaOutput:
 
 
 class FakeTiva:
+    def __init__(self):
+        self.told_l = time.time()
+        self.told_r = time.time()
+        self.del_t_l = 0
+        self.del_t_r = 0
+        self.left = 0
+        self.right = 0
+
+    def callback_left(self, data):
+
+        now = time.time()
+        self.del_t_l = now - self.told_l
+        self.told_l=now
+        self.left = data.data
+
+    def callback_right(self, data):
+
+        now = time.time()
+        self.del_t_r = now - self.told_r
+        self.told_r = now
+        self.right = data.data
+
     def readline(self):
         pass
 
     def readlines(self):
+        rospy.Subscriber("enc0_rpm", Float64, self.callback_right)
+        rospy.Subscriber("enc1_rpm", Float64, self.callback_left)
         for i in range(10):
-            yield "1 350 400"
+            yield f"{(self.del_t_l+self.del_t_r)/2} {self.left} {self.right}"
         return
 
 
 def main():
+    rospy.init_node('tiva_ros_driver')
     tiva = FakeTiva()
     try:
         tout = TivaOutput(tiva)
