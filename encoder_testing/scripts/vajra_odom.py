@@ -17,9 +17,9 @@ import queue
 
 from geometry_msgs.msg import Pose, Quaternion, Point
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Int64
 from virat_msgs.msg import WheelVel
 from tf.transformations import quaternion_from_euler
+from vajra_controller_tiva.msg import enc_pulses
 
 
 def sgn(x):
@@ -33,8 +33,8 @@ def sgn(x):
 
 class OdomOutput:
     # Defining Vehicle and encoder constants
-    wheel_dist: float = 0.67
-    wheel_radius: float = 0.12
+    wheel_dist: float = 0.86
+    wheel_radius: float = 0.2
     rotation_ratio: int = 1024 * 4
 
     _pulse_per_rev: int = 1024
@@ -62,6 +62,7 @@ class OdomOutput:
         self.odom_pub = rospy.Publisher(self.odom_topic, Odometry, queue_size=1)
         self.vel_pub = rospy.Publisher(self.wheel_vel_topic, WheelVel, queue_size=1)
         self.enc_queue = queue.Queue()
+        self.first_empty = 0
 
         self.odom: Odometry = Odometry()
         self.odom.header.frame_id = "odom"
@@ -138,7 +139,7 @@ class OdomOutput:
         # updates pose covariance using update_covariance
         # CONVENTION: 1 indicates right and 2 indicates left
 
-        time_thresh = 0.1
+        time_thresh = 0.5
         # no of seconds we can get no data before we start throwing warnings.
 
         dt = 0  # As counted on the TIVA
@@ -148,26 +149,33 @@ class OdomOutput:
             num = self.enc_queue.qsize()
         else:
             num = 10
-
         if self.enc_queue.empty():
-            try:
-                last_seen = time.time() - first_empty
+            if self.first_empty != 0:
+                last_seen = time.time() - self.first_empty
                 if last_seen > time_thresh:
                     rospy.logerr(f"Haven't received encoder data in {last_seen}s. Still Waiting.")
-                    del first_empty
+                    self.first_empty = 0
                 num = 0
-            except NameError:
-                first_empty = time.time()
+            else:
+                self.first_empty = time.time()
+                num = 0
 
         if self.enc_queue.qsize() > 100:
-            rospy.logwarn(f"Can't keep up with data! {self.enc_queue.qsize()} have piled up!")
+            rospy.logwarn(f"Can't keep up with data! {self.enc_queue.qsize()} entries have piled up!")
 
         for i in range(num):
 
             # n is the number of counts
             data = self.enc_queue.get()
             n1, n2 = data.enc0, data.enc1
-            dt += data.header.ddt
+
+            if dt == 0:
+                start_time = data.Header.stamp.secs + data.Header.stamp.nsecs * (10 ** -9)
+                dt += -1
+            else:
+                dt += 1
+                dt += data.Header.stamp.secs + data.Header.stamp.nsecs * (10 ** -9) - start_time
+
             n1tot += n1
             n2tot += n2
             if self._flip_motor_channels:
@@ -214,7 +222,7 @@ class OdomOutput:
         self.r_dist += s1
         self.l_dist += s2
 
-        self.update_covariance()
+        #self.update_covariance()
 
     # Accessed by update for the covariance matrix. Separated for modularity.
     def update_covariance(self):
@@ -337,7 +345,7 @@ class OdomOutput:
 def main():
     rospy.init_node('enc_odom')
     enc_to_odom = OdomOutput()
-    rospy.Subscriber("encoder_pulses", Int64, enc_to_odom.enc_callback)
+    rospy.Subscriber("/enc_pulses", enc_pulses, enc_to_odom.enc_callback)
     try:
         enc_to_odom.run()
     except Exception as e:
