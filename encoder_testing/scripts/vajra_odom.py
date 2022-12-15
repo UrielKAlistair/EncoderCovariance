@@ -222,7 +222,7 @@ class OdomOutput:
         self.r_dist += s1
         self.l_dist += s2
 
-        #self.update_covariance()
+        self.update_covariance()
 
     # Accessed by update for the covariance matrix. Separated for modularity.
     def update_covariance(self):
