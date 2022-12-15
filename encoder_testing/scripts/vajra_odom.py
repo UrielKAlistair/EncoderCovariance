@@ -13,12 +13,13 @@ import math
 import time
 import numpy as np
 import rospy
+import queue
 
 from geometry_msgs.msg import Pose, Quaternion, Point
-from virat_msgs.msg import WheelVel
 from nav_msgs.msg import Odometry
-from tf.transformations import quaternion_from_euler
 from std_msgs.msg import Int64
+from virat_msgs.msg import WheelVel
+from tf.transformations import quaternion_from_euler
 
 
 def sgn(x):
@@ -30,13 +31,13 @@ def sgn(x):
         return -1
 
 
-class TivaOutput:
+class OdomOutput:
     # Defining Vehicle and encoder constants
     wheel_dist: float = 0.67
     wheel_radius: float = 0.12
     rotation_ratio: int = 1024 * 4
 
-    _pulse_per_rev: int = 1024 * 66
+    _pulse_per_rev: int = 1024
     _counts_per_rev: int = _pulse_per_rev * 4
 
     _flip_motor_channels: bool = False
@@ -47,22 +48,20 @@ class TivaOutput:
     # Link to paper: https://www.cs.cmu.edu/~motionplanning/papers/sbp_papers/kalman/chong_accurate_odometry_error.pdf
     # https://ecse.monash.edu/techrep/reports/pre-2003/MECSE-6-1996.pdf
 
+    # TODO: Tune these to reasonable values. They are presently arbitrary.
     kl = 0.00001
     kr = 0.00001
 
-    def __init__(self, tiva, odom_topic: str = 'odom', wheel_vel_topic: str = "wheel_vel", rate: int = 50):
+    def __init__(self, odom_topic: str = 'odom', wheel_vel_topic: str = "wheel_vel", rate: int = 50):
 
         self.odom_topic = odom_topic
         self.wheel_vel_topic = wheel_vel_topic
 
         self.rate = rate
 
-        self.tiva = tiva
-        time.sleep(0.2)
-        self.tiva.readline()
-
         self.odom_pub = rospy.Publisher(self.odom_topic, Odometry, queue_size=1)
         self.vel_pub = rospy.Publisher(self.wheel_vel_topic, WheelVel, queue_size=1)
+        self.enc_queue = queue.Queue()
 
         self.odom: Odometry = Odometry()
         self.odom.header.frame_id = "odom"
@@ -119,7 +118,8 @@ class TivaOutput:
 
         ###################################
 
-        # TODO: Determine a reasonable number beyond which r can be set to -1, so that we can avoid heavy computation.
+        # TODO: If the radius of curvature is very large, we consider the path to be a straight line.
+        #  (this avoids heavy computation.) determine a reasonable threshold for this.
         # This number is called r_thresh and is presently defined arbitrarily to be 10 kilometers.
         self.r_thresh = 10000
 
@@ -128,73 +128,96 @@ class TivaOutput:
         # TODO: Determine a reasonable number for r_tolerance
         self.r_tolerance = 10 ** (-5)
 
-    # updates the vehicle's position and pose covariance when new data is received
-    def update(self, computer_dt: float):
-        right = 0
-        left = 0
-        dt = 0  # As counted on the TIVA
-        for line in self.tiva.readlines():
-            # print(">>>", line)
-            try:
-                # n is the number of counts
-                # TODO: Check for overflow
-                # 1 indicates right and 2 indicates left
-                ddt, n1, n2 = map(int, line.strip().split(' '))
-            except ValueError:
-                rospy.logerr(f"TIVA returned an invalid line of data: {line}")
-                # print("VALUE ERROR")  # TODO: ```readlines``` is returning partial lines :ugh: fix.
-                # print(line)
-                continue
+    def enc_callback(self, data):
+        # Queues up the encoder data as and when it arrives. Main loop runs on a different speed from the encoder data.
+        self.enc_queue.put(data)
 
-            dt += ddt
+    def update(self):
+        # Consumes Encoder callback queue. Takes last 10 if more than 10 piled up.
+        # updates the vehicle's position
+        # updates pose covariance using update_covariance
+        # CONVENTION: 1 indicates right and 2 indicates left
+
+        time_thresh = 0.1
+        # no of seconds we can get no data before we start throwing warnings.
+
+        dt = 0  # As counted on the TIVA
+        n1tot = 0
+        n2tot = 0
+        if self.enc_queue.qsize() < 10:
+            num = self.enc_queue.qsize()
+        else:
+            num = 10
+
+        if self.enc_queue.empty():
+            try:
+                last_seen = time.time() - first_empty
+                if last_seen > time_thresh:
+                    rospy.logerr(f"Haven't received encoder data in {last_seen}s. Still Waiting.")
+                    del first_empty
+                num = 0
+            except NameError:
+                first_empty = time.time()
+
+        if self.enc_queue.qsize() > 100:
+            rospy.logwarn(f"Can't keep up with data! {self.enc_queue.qsize()} have piled up!")
+
+        for i in range(num):
+
+            # n is the number of counts
+            data = self.enc_queue.get()
+            n1, n2 = data.enc0, data.enc1
+            dt += data.header.ddt
+            n1tot += n1
+            n2tot += n2
             if self._flip_motor_channels:
                 n2, n1 = n1, n2
+            self.update_pose(n1, n2)
 
-            # th is theta, i.e. the angle the wheel rotates by
-            th1, th2 = 2 * math.pi * n1 / self._counts_per_rev, 2 * math.pi * n2 / self._counts_per_rev
-
-            # Update ODOM
-            # s is the distance moved by each wheel
-            s1, s2 = th1 * self.wheel_radius, th2 * self.wheel_radius
-
-            # Update Velocity
-            right += n1
-            left += n2
-
-            self.x += ((s1 + s2) / 2) * math.cos(self.yaw)
-            self.y += ((s1 + s2) / 2) * math.sin(self.yaw)
-            self.yaw += (s1 - s2) / self.wheel_dist
-
-            # Update Covariances
-            if s1 != s2:
-                self.r = (self.wheel_dist * (s1 + s2)) / ((s2 - s1) * 2)
-                if self.r > self.r_thresh:
-                    self.r = -1
-            else:
-                self.r = -1  # Have to handle straight line case separately
-
-            # If r has changed, reset Zero State.
-            if abs(self.r - self.r_old) > self.r_tolerance:  # r != rold , but with tolerance
-                self.r_old = self.r
-                self.theta0 = self.theta_last
-                self.S0 = self.covar3by3
-                self.r_dist = s1
-                self.l_dist = s2
-
-            self.r_dist += s1
-            self.l_dist += s2
-
-            self.get_covariance()
+        # Updates velocities. Datatype is Wheelvel.
+        # TODO: confirm if the velocity is in the correct format. This velocity is not in m/s
 
         if dt != 0:
-            self.vr = right / self._counts_per_rev * 60 * 1000 / dt
-            self.vl = left / self._counts_per_rev * 60 * 1000 / dt
+            self.vr = n1tot / self._counts_per_rev * 60 * 1000 / dt
+            self.vl = n2tot / self._counts_per_rev * 60 * 1000 / dt
             self.dt = dt
 
-        # print(f"{dt}\t{right:.4f}\t{left:.4f}\t{self.vr:.4f}\t{self.vl:.4f}")
+    def update_pose(self, n1, n2):
 
-    # Accessed by update for covariance. Separated for modularity.
-    def get_covariance(self):
+        # th is theta, i.e. the angle the wheel rotates by
+        th1, th2 = 2 * math.pi * n1 / self._counts_per_rev, 2 * math.pi * n2 / self._counts_per_rev
+
+        # Update pose
+        # s is the distance moved by each wheel
+        s1, s2 = th1 * self.wheel_radius, th2 * self.wheel_radius
+
+        self.x += ((s1 + s2) / 2) * math.cos(self.yaw)
+        self.y += ((s1 + s2) / 2) * math.sin(self.yaw)
+        self.yaw += (s1 - s2) / self.wheel_dist
+
+        # Update Covariance parameters
+        if s1 != s2:
+            self.r = (self.wheel_dist * (s1 + s2)) / ((s2 - s1) * 2)
+            if self.r > self.r_thresh:
+                self.r = -1
+        else:
+            self.r = -1  # Have to handle straight line case separately
+
+        # If r has changed, reset Zero State.
+        if abs(self.r - self.r_old) > self.r_tolerance:  # r != rold , but with tolerance
+            self.r_old = self.r
+            self.theta0 = self.theta_last
+            self.S0 = self.covar3by3
+            self.r_dist = s1
+            self.l_dist = s2
+
+        self.r_dist += s1
+        self.l_dist += s2
+
+        self.update_covariance()
+
+    # Accessed by update for the covariance matrix. Separated for modularity.
+    def update_covariance(self):
 
         # Updating matrix A to suit current state
         self.A[0, 2] = self.r * (math.cos(self.theta0) - math.cos(self.yaw))
@@ -278,17 +301,16 @@ class TivaOutput:
 
         self.covar3by3 = U + self.A @ self.S0 @ self.A.T
 
-    # Main loop
+    # Main Loop
     def run(self):
+
         r = rospy.Rate(self.rate)
         msg = Odometry()
         msg.header.frame_id = "map"
 
-        prev_time = time.time()
         while not rospy.is_shutdown():
-            cur_time = time.time()
-            self.update(cur_time - prev_time)
-            prev_time = cur_time
+
+            self.update()
 
             self.vel.header.stamp = rospy.Time.now()
             self.vel.right = self.vr
@@ -308,66 +330,18 @@ class TivaOutput:
                 roscovar[30 + i] = self.covar3by3[2, i]
 
             self.odom.pose.covariance = roscovar
-
             self.odom_pub.publish(self.odom)
-
             r.sleep()
-
-
-class FakeTiva:
-    def __init__(self):
-        self.told_l = time.time()
-        self.told_r = time.time()
-        self.del_t_l = 0
-        self.del_t_r = 0
-        self.left = 0
-        self.right = 0
-        self.ltot = None
-        self.rtot = None
-
-    from message_filters import TimeSynchronizer
-    def callback_left(self, data):
-
-        now = time.time()
-        self.del_t_l = now - self.told_l
-        self.told_l = now
-        if self.ltot is None:
-            self.left = 0
-            return
-        self.left = data.data - self.ltot
-        self.ltot = data.data
-
-    def callback_right(self, data):
-
-        now = time.time()
-        self.del_t_r = now - self.told_r
-        self.told_r = now
-        if self.rtot is None:
-            self.right = 0
-            return
-        self.right = data.data - self.rtot
-        self.rtot = data.data
-
-    def readline(self):
-        pass
-
-    def readlines(self):
-        rospy.Subscriber("enc0_pos", Int64, self.callback_right)
-        rospy.Subscriber("enc1_pos", Int64, self.callback_left)
-        for i in range(10):
-            yield f"{(self.del_t_l + self.del_t_r) / 2} {self.left} {self.right}"
-        return
 
 
 def main():
     rospy.init_node('enc_odom')
-    tiva = FakeTiva()
+    enc_to_odom = OdomOutput()
+    rospy.Subscriber("encoder_pulses", Int64, enc_to_odom.enc_callback)
     try:
-        tout = TivaOutput(tiva)
-        tout.run()
+        enc_to_odom.run()
     except Exception as e:
         print(e)
-        pass
 
 
 if __name__ == "__main__":
