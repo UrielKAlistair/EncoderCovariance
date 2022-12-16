@@ -33,12 +33,16 @@ def sgn(x):
 
 class OdomOutput:
     # Defining Vehicle and encoder constants
-    wheel_dist: float = 0.86
-    wheel_radius: float = 0.2
-    rotation_ratio: int = 1024 * 4
+    wheel_dist: float = 2.52  # 2.5 is theoretical, 0.86 is real.
+    wheel_radius: float = 0.184
 
     _pulse_per_rev: int = 1024
-    _counts_per_rev: int = _pulse_per_rev * 4
+    gear_ratio = 5 / 4
+    _counts_per_rev: int = _pulse_per_rev * 4 * gear_ratio
+    # This is the number of encoder counts corresponding to one revolution of the tyre.
+    # A pulse is a square wave pulse.
+    # Each pulse triggers 4 counts.
+    # 1024 pulses constitute one revolution of the encoder.
 
     _flip_motor_channels: bool = False
 
@@ -52,7 +56,7 @@ class OdomOutput:
     kl = 0.00001
     kr = 0.00001
 
-    def __init__(self, odom_topic: str = 'odom', wheel_vel_topic: str = "wheel_vel", rate: int = 50):
+    def __init__(self, odom_topic: str = 'odom_new', wheel_vel_topic: str = "wheel_vel", rate: int = 50):
 
         self.odom_topic = odom_topic
         self.wheel_vel_topic = wheel_vel_topic
@@ -173,13 +177,13 @@ class OdomOutput:
             n1, n2 = data.enc0, data.enc1
 
             if dt == 0:
-                start_time = data.Header.stamp.secs + data.Header.stamp.nsecs * (10 ** -9)
+                prev_time = data.Header.stamp.secs + data.Header.stamp.nsecs * (10 ** -9)
                 dt += -1
             else:
                 dt += 1
                 new_time = data.Header.stamp.secs + data.Header.stamp.nsecs * (10 ** -9)
-                dt += new_time - start_time
-                start_time = new_time
+                dt += new_time - prev_time
+                prev_time = new_time
 
             n1tot += n1
             n2tot += n2
@@ -193,7 +197,7 @@ class OdomOutput:
         if dt != 0:
             self.vr = n1tot / self._counts_per_rev * 60 * 1000 / dt
             self.vl = n2tot / self._counts_per_rev * 60 * 1000 / dt
-            self.dt = int(dt*1000)
+            self.dt = int(dt * 1000)
 
     def update_pose(self, n1, n2):
 
@@ -351,6 +355,7 @@ def main():
     rospy.init_node('enc_odom')
     enc_to_odom = OdomOutput()
     rospy.Subscriber("/enc_pulses", enc_pulses, enc_to_odom.enc_callback)
+    rospy.loginfo("I am now alive.")
     try:
         enc_to_odom.run()
     except Exception as e:

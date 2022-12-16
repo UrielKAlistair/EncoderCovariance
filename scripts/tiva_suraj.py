@@ -13,6 +13,7 @@ from virat_msgs.msg import WheelVel
 from nav_msgs.msg import Odometry
 from tf.transformations import quaternion_from_euler
 
+import queue
 
 class TivaOutput:
     wheel_dist: float = 0.67
@@ -23,6 +24,9 @@ class TivaOutput:
     _counts_per_rev: int = _pulse_per_rev * 4
 
     _flip_motor_channels: bool = False
+
+    msgs: queue.Queue
+
 
     def __init__(self, tiva, odom_topic: str = 'odom', wheel_vel_topic: str = "wheel_vel", rate: int = 50,
                  ):
