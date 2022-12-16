@@ -149,6 +149,7 @@ class OdomOutput:
             num = self.enc_queue.qsize()
         else:
             num = 10
+
         if self.enc_queue.empty():
             if self.first_empty != 0:
                 last_seen = time.time() - self.first_empty
@@ -159,6 +160,8 @@ class OdomOutput:
             else:
                 self.first_empty = time.time()
                 num = 0
+        else:
+            self.first_empty = 0
 
         if self.enc_queue.qsize() > 100:
             rospy.logwarn(f"Can't keep up with data! {self.enc_queue.qsize()} entries have piled up!")
