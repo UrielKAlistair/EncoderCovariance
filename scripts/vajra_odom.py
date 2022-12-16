@@ -8,7 +8,7 @@
 # Parameters: Vehicle constants wheel separation, wheel radius, pulses per rev etc. defined in init of TivaOutput
 # Arbitrary constants: r_thresh r_tolerance kl kr
 # Output robot pose and pose covar packaged in odom
-
+# TODO: Check Wheelvel message integrity.
 import math
 import time
 import numpy as np
@@ -177,7 +177,9 @@ class OdomOutput:
                 dt += -1
             else:
                 dt += 1
-                dt += data.Header.stamp.secs + data.Header.stamp.nsecs * (10 ** -9) - start_time
+                new_time = data.Header.stamp.secs + data.Header.stamp.nsecs * (10 ** -9)
+                dt += new_time - start_time
+                start_time = new_time
 
             n1tot += n1
             n2tot += n2
@@ -191,7 +193,7 @@ class OdomOutput:
         if dt != 0:
             self.vr = n1tot / self._counts_per_rev * 60 * 1000 / dt
             self.vl = n2tot / self._counts_per_rev * 60 * 1000 / dt
-            self.dt = dt
+            self.dt = int(dt*1000)
 
     def update_pose(self, n1, n2):
 
