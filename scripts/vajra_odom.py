@@ -149,10 +149,7 @@ class OdomOutput:
         dt = 0  # As counted on the TIVA
         n1tot = 0
         n2tot = 0
-        if self.enc_queue.qsize() < 10:
-            num = self.enc_queue.qsize()
-        else:
-            num = 10
+        num = min(10, self.enc_queue.qsize())
 
         if self.enc_queue.empty():
             if self.first_empty != 0:

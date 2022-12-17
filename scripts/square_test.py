@@ -42,6 +42,9 @@ class SquareTest:
                     pubr.publish(-self.speed)
                 self.angle = 0
                 self.count = 0
+                prompt = input('do you wish to continue? y/n')
+                if prompt.lower() != 'y':
+                    break
 
     def callback(self, data):
         self.count += (data.enc0 + data.enc1) / 2
