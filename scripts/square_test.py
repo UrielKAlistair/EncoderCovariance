@@ -20,15 +20,15 @@ class SquareTest:
         self.side = side
         self.speed = speed
         self.count = 0
-        self.angle=0
+        self.angle = 0
         self.turns = 0
         if orientation == "acw":
             self.speed = -self.speed
 
     def run(self):
         rospy.init_node('vajra_teleop_new')
-        publ = rospy.Publisher('left_wheel/setpoint', Float64)
-        pubr = rospy.Publisher('right_wheel/setpoint', Float64)
+        publ = rospy.Publisher('left_wheel/setpoint', Float64, queue_size=10)
+        pubr = rospy.Publisher('right_wheel/setpoint', Float64, queue_size=10)
 
         while not rospy.is_shutdown() and self.turns < 4:
             distance = self.count_to_dist(self.count)
@@ -37,12 +37,18 @@ class SquareTest:
                 pubr.publish(abs(self.speed))
             else:
                 self.turns += 1
-                while self.angle <= math.pi / 2:
+                while abs(self.angle) <= math.pi / 2:
                     publ.publish(self.speed)
                     pubr.publish(-self.speed)
+
+                publ.publish(0)
+                pubr.publish(0)
+                print(f"angle right now = {self.angle}")
+                print("In degrees", self.angle * 180 / math.pi)
                 self.angle = 0
                 self.count = 0
-                prompt = input('do you wish to continue? y/n')
+
+                prompt = input('Do you wish to continue? y/n')
                 if prompt.lower() != 'y':
                     break
 
@@ -55,8 +61,10 @@ class SquareTest:
 
 if __name__ == "__main__":
     try:
-        test = SquareTest(1.5)
+        test = SquareTest(1.5, orientation='acw')
         rospy.Subscriber("/enc_pulses", enc_pulses, test.callback)
-        test.run()
+        prompt = input('Do you wish to Commence testing? y/n')
+        if prompt.lower() == 'y':
+            test.run()
     except Exception as e:
         print(e)

@@ -8,7 +8,7 @@
 # Parameters: Vehicle constants wheel separation, wheel radius, pulses per rev etc. defined in init of TivaOutput
 # Arbitrary constants: r_thresh r_tolerance kl kr
 # Output robot pose and pose covar packaged in odom
-# TODO: Check Wheelvel message integrity.
+
 import math
 import time
 import numpy as np
@@ -164,7 +164,7 @@ class OdomOutput:
         else:
             self.first_empty = 0
 
-        if self.enc_queue.qsize() > 100:
+        if self.enc_queue.qsize() > 20:
             rospy.logwarn(f"Can't keep up with data! {self.enc_queue.qsize()} entries have piled up!")
 
         for i in range(num):
@@ -188,12 +188,9 @@ class OdomOutput:
                 n2, n1 = n1, n2
             self.update_pose(n1, n2)
 
-        # Updates velocities. Datatype is Wheelvel.
-        # TODO: confirm if the velocity is in the correct format. This velocity is not in m/s
-
         if dt != 0:
-            self.vr = n1tot / self._counts_per_rev * 60 * 1000 / dt
-            self.vl = n2tot / self._counts_per_rev * 60 * 1000 / dt
+            self.vr = n1tot / self._counts_per_rev * 60 / dt
+            self.vl = n2tot / self._counts_per_rev * 60 / dt
             self.dt = int(dt * 1000)
 
     def update_pose(self, n1, n2):
@@ -295,8 +292,8 @@ class OdomOutput:
             coeff2 = c2 / pow(self.wheel_dist, 2)
             coeff3 = (self.wheel_dist * c3 / lr3)
 
-            U[0, 0] = -coeff1 * (math.sin(self.theta0) - math.sin(self.yaw)) * cos_yaw + pow(
-                (self.r * cos_yaw / self.wheel_dist), 2) * c2 - (coeff3 / 4) * (
+            U[0, 0] = -coeff1 * (math.sin(self.theta0) - math.sin(self.yaw)) * cos_yaw + (
+                        (self.r * cos_yaw / self.wheel_dist) ** 2) * c2 - (coeff3 / 4) * (
                               2 * (self.yaw - self.theta0) - math.sin(2 * self.theta0) + math.sin(2 * self.yaw))
             U[1, 1] = -coeff1 * (cos_yaw - math.cos(self.theta0)) * sin_yaw + pow(
                 (self.r * sin_yaw / self.wheel_dist), 2) * c2 - (coeff3 / 4) * (
