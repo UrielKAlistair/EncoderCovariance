@@ -27,7 +27,7 @@ from vajra_controller_tiva.msg import enc_pulses
 
 class OdomOutput:
     # Defining Vehicle and encoder constants
-    wheel_dist: float = 0.4625 # 0.845
+    wheel_dist: float = 0.4625 # 0.5933988764044943  scaled experimental data  binary searched
     wheel_radius: float = 0.262016
     # 8 inches is real. Expt gave 0.184
 
@@ -73,8 +73,8 @@ class OdomOutput:
         self.pose_jacobian = None
         self.velocity_jacobian = None
 
-        self.k_right = 0.1  # 10 ** -5  # experimental constant for error in right wheel distance measurements
-        self.k_left = 0.1  # 10 ** -5  # experimental constant for error in left wheel distance measurements
+        self.k_right = 0.01  # 10 ** -5  # experimental constant for error in right wheel distance measurements
+        self.k_left = 0.01  # 10 ** -5  # experimental constant for error in left wheel distance measurements
 
     def enc_callback(self, data):
         # Queues up the encoder data as and when it arrives. Main loop runs on a different speed from the encoder data.
@@ -160,7 +160,7 @@ class OdomOutput:
         self.x += dx
         self.y += dy
 
-        s1,s2=s2,s1
+        s1, s2 = s2, s1
         # updating the values of the matrices
         self.motion_cov = np.array([
             [self.k_right * abs(s1), 0],
@@ -209,10 +209,15 @@ class OdomOutput:
 
             # Coverting 3x3 to 6x6 (36 entry list) for ros
             roscovar = [0] * 36
-            for i in range(3):
+
+            for i in range(2):
                 roscovar[i] = self.covar3by3[0, i]
                 roscovar[6 + i] = self.covar3by3[1, i]
                 roscovar[30 + i] = self.covar3by3[2, i]
+
+            roscovar[5] = self.covar3by3[0, 2]
+            roscovar[10] = self.covar3by3[1, 2]
+            roscovar[35] = self.covar3by3[2, 2]
 
             self.odom.pose.covariance = roscovar
             self.odom_pub.publish(self.odom)
