@@ -27,7 +27,7 @@ from vajra_controller_tiva.msg import enc_pulses
 
 class OdomOutput:
     # Defining Vehicle and encoder constants
-    wheel_dist: float = 0.4625 # 0.5933988764044943  scaled experimental data  binary searched
+    wheel_dist: float = 0.45  # scaled experimental data 0.5933988764044943 binary searched 0.4625
     wheel_radius: float = 0.262016
     # 8 inches is real. Expt gave 0.184
 
@@ -41,7 +41,7 @@ class OdomOutput:
 
     _flip_motor_channels: bool = False
 
-    def __init__(self, odom_topic: str = 'odom_new', wheel_vel_topic: str = "wheel_vel", rate: int = 50):
+    def __init__(self, odom_topic: str = 'enc_odom', wheel_vel_topic: str = "wheel_vel", rate: int = 50):
 
         self.odom_topic = odom_topic
         self.wheel_vel_topic = wheel_vel_topic
@@ -64,6 +64,10 @@ class OdomOutput:
         self.y: float = 0.0
         self.yaw: float = 0.0
 
+        self.vx: float = 0.0
+        self.vy: float = 0.0
+        self.wz: float = 0.0
+
         self.vr = 0
         self.vl = 0
         self.dt = 0
@@ -73,8 +77,9 @@ class OdomOutput:
         self.pose_jacobian = None
         self.velocity_jacobian = None
 
-        self.k_right = 0.01  # 10 ** -5  # experimental constant for error in right wheel distance measurements
-        self.k_left = 0.01  # 10 ** -5  # experimental constant for error in left wheel distance measurements
+        self.k = 10 ** (-5)
+        self.k_right = self.k  # experimental constant for error in right wheel distance measurements
+        self.k_left = self.k  # experimental constant for error in left wheel distance measurements
 
     def enc_callback(self, data):
         # Queues up the encoder data as and when it arrives. Main loop runs on a different speed from the encoder data.
@@ -89,12 +94,19 @@ class OdomOutput:
         time_thresh = 0.5
         # number of seconds we can get ghosted before we start throwing warnings.
 
-        dt = 0  # As counted on the TIVA
+        dt, ddt = 0, 0  # As counted on the TIVA
         n1tot = 0
         n2tot = 0
         num = min(10, self.enc_queue.qsize())
 
         if self.enc_queue.empty():
+
+            # If the queue is empty, we check if this has happened recently. first_empty = 0 means not recent.
+            # The first time it's empty, first_empty is set to the current time.
+            # In every successive iteration, we check if any data has been received.
+            # If we do get data, first_empty is reset to 0.
+            # If we do not, an error is logged to ROS after a time_thresh. Error repeats in intervals of time_thresh.
+
             if self.first_empty != 0:
                 last_seen = time.time() - self.first_empty
                 if last_seen > time_thresh:
@@ -108,8 +120,9 @@ class OdomOutput:
             self.first_empty = 0
 
         if self.enc_queue.qsize() > 20:
-            rospy.logwarn(f"Can't keep up with data! {self.enc_queue.qsize()} entries have piled up!")
+            rospy.logwarn(f"enc_odom can't keep up with encoder data! {self.enc_queue.qsize()} entries have piled up!")
 
+        first_time = True
         for i in range(num):
 
             # n is the number of counts
@@ -117,28 +130,36 @@ class OdomOutput:
             n1, n2 = data.enc0, data.enc1
 
             # I'm taking dt in seconds
-            if dt == 0:
+            if first_time is True:
                 prev_time = data.Header.stamp.secs + data.Header.stamp.nsecs * (10 ** -9)
-                dt += -1
+                first_time = False
             else:
-                dt += 1
                 new_time = data.Header.stamp.secs + data.Header.stamp.nsecs * (10 ** -9)
-                dt += new_time - prev_time
+                ddt = new_time - prev_time
                 prev_time = new_time
+
+            if self._flip_motor_channels:
+                n2, n1 = n1, n2
 
             n1tot += n1
             n2tot += n2
-            if self._flip_motor_channels:
-                n2, n1 = n1, n2
-            self.update_pose(n1, n2)
+            self.update_pose(n1, n2, ddt)
             self.update_covariance()
+            dt += ddt
+
+            # ddt is the interval for which n1 and n2 were recorded.
+            # This ddt is used to update velocities. Odom message always gives the last known velocity.
+            # dt is the total time of all the messages we clear when we empty the queue.
+            # dt is used to publish a wheelvel message with the average wheel vel of the cleared queue.
+            # I honestly don't know where wheelvel is being used, but I'm publishing it coz it was there in older code.
+            # TODO: If this avg is not the expected behaviour of wheelvel, it needs to be changed.
 
         if dt != 0:
             self.vr = n1tot / self._counts_per_rev * 60 / dt
             self.vl = n2tot / self._counts_per_rev * 60 / dt
             self.dt = int(dt * 1000)
 
-    def update_pose(self, n1, n2):  # updates x,y,yaw and the jacobians using s1 and s2
+    def update_pose(self, n1, n2, dt):  # updates x,y,yaw and the jacobians using s1 and s2
 
         # th is theta, i.e. the angle the wheel rotates by
         th1, th2 = 2 * math.pi * n1 / self._counts_per_rev, 2 * math.pi * n2 / self._counts_per_rev
@@ -154,6 +175,12 @@ class OdomOutput:
         sin_yaw = math.sin(self.yaw + (dyaw / 2))
         dx = ds * cos_yaw
         dy = ds * sin_yaw
+
+        # updating the velocities
+        if dt != 0:
+            self.vx = dx / dt
+            self.vy = dy / dt
+            self.wz = dyaw / dt
 
         # updating the coordinates
         self.yaw += dyaw
@@ -206,6 +233,9 @@ class OdomOutput:
             self.odom.header.stamp = rospy.Time.now()
             self.odom.pose.pose = Pose(Point(self.x, self.y, 0.0),
                                        Quaternion(*quaternion_from_euler(0, 0, self.yaw)))
+            self.odom.twist.twist.linear.x = self.vx
+            self.odom.twist.twist.linear.y = self.vy
+            self.odom.twist.twist.angular.z = self.wz
 
             # Coverting 3x3 to 6x6 (36 entry list) for ros
             roscovar = [0] * 36
@@ -225,10 +255,10 @@ class OdomOutput:
 
 
 def main():
-    rospy.init_node('enc_odom')
+    rospy.init_node('encoder_odometry')
     enc_to_odom = OdomOutput()
     rospy.Subscriber("/enc_pulses", enc_pulses, enc_to_odom.enc_callback)
-    rospy.loginfo("I am now alive. Publishing odom...")
+    rospy.loginfo("enc_odom is now alive. Publishing...")
     try:
         enc_to_odom.run()
     except Exception as e:
